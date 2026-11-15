@@ -76,6 +76,7 @@ jobs:
     needs: lint
     env:
       RQLITE_URL: http://localhost:4001
+      RQLITE_AUTH_URL: http://localhost:4011
     steps:
       - uses: actions/checkout@v4
       - uses: crystal-lang/install-crystal@v1
@@ -97,5 +98,17 @@ jobs:
 
       - name: Wait for rqlited
         run: timeout 30 bash -c 'until curl -sf http://localhost:4001/status; do sleep 1; done'
+
+      # Second node with HTTP Basic Auth enabled, for the auth-failure e2e
+      # tests (RQLITE_AUTH_URL) — see README.md "Development".
+      - name: Start an auth-enabled rqlited node
+        run: |
+          mkdir -p /tmp/rqlite-auth
+          echo '[{"username": "admin", "password": "secret", "perms": ["all"]}]' > /tmp/rqlite-auth.json
+          rqlited -node-id=9 -http-addr=localhost:4011 -raft-addr=localhost:4012 \
+            -auth=/tmp/rqlite-auth.json /tmp/rqlite-auth &
+
+      - name: Wait for the auth-enabled node
+        run: timeout 30 bash -c 'until [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4011/status)" != "000" ]; do sleep 1; done'
 
       - run: make e2e
