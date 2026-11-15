@@ -7,6 +7,12 @@ tagged via `make tag`).
 
 ## [Unreleased]
 
+- Added `Rqlite.bulk_exec(db, ...)`/`Rqlite.queue_exec(db, ...)` module-
+  level convenience wrappers around `Rqlite::Connection#bulk_exec`/
+  `#queue_exec`, so calling them no longer requires manually checking
+  out, downcasting, and releasing a pooled connection. `#bulk_exec` now
+  also raises if called while a buffered transaction is open, matching
+  `#queue_exec`'s existing guard.
 - `Rqlite::Connection` no longer constructs `HTTP::Client` inline; it now
   always goes through an injectable `ClientBuilder`
   (`Proc(URI, Time::Span, HTTP::Client)`), defaulting to

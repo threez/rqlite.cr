@@ -289,6 +289,8 @@ class Rqlite::Connection < DB::Connection
   # all-or-nothing commit of the whole batch (same mechanism
   # `db.transaction` uses internally — see "Transactions" above).
   def bulk_exec(statements : Array(String | {String, Array(DB::Any)}), transaction : Bool = false) : Array(DB::ExecResult)
+    raise Rqlite::Error.new("bulk_exec cannot be used inside a buffered transaction") if @transaction_buffer
+
     arrays = statements.map do |stmt|
       case stmt
       when String

@@ -62,7 +62,7 @@ rqlite's own docs state that explicitly issuing `BEGIN`/`COMMIT`/`ROLLBACK` SQL 
 - `perform_rollback_transaction` just discards the buffer — **no HTTP call at all**, which is the nice property of buffering.
 - Savepoints (`perform_create_savepoint`/`perform_rollback_savepoint`/`perform_release_savepoint`) are implemented as buffer-length checkpoints, not real SQL `SAVEPOINT` statements.
 
-`bulk_exec` and `queue_exec` on `Connection` are additional convenience methods beyond the standard `DB::Statement` interface (rqlite's true multi-statement bulk requests and Queued Writes, respectively) — `bulk_exec` shares its request/response handling with `perform_commit_transaction` via the private `send_bulk` helper.
+`bulk_exec` and `queue_exec` on `Connection` are additional convenience methods beyond the standard `DB::Statement` interface (rqlite's true multi-statement bulk requests and Queued Writes, respectively) — `bulk_exec` shares its request/response handling with `perform_commit_transaction` via the private `send_bulk` helper. Both raise if called while a buffered transaction is open — the two models don't compose. `Rqlite.bulk_exec(db, ...)`/`Rqlite.queue_exec(db, ...)` (module-level, in `src/rqlite.cr`) are thin wrappers around these for callers holding a `DB::Database` rather than an already-checked-out `Connection`, using `DB::Database#using_connection` for the checkout/release.
 
 ### Multi-host failover
 

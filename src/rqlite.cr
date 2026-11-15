@@ -64,6 +64,26 @@ module Rqlite
     @@client_builder = builder
   end
 
+  # Runs *statements* as one real bulk `/db/execute` request against a
+  # connection checked out from *db*'s pool — a convenience wrapper
+  # around `Rqlite::Connection#bulk_exec` for the common case of having a
+  # `DB::Database` (e.g. from `DB.open`) rather than an already-checked-
+  # out `Connection`. See `Rqlite::Connection#bulk_exec` for the full
+  # semantics (positional params, `transaction:`, per-statement
+  # `DB::ExecResult`s, stop-at-first-error behavior).
+  def self.bulk_exec(db : DB::Database, statements : Array(String | {String, Array(DB::Any)}), transaction : Bool = false) : Array(DB::ExecResult)
+    db.using_connection { |cnn| cnn.as(Connection).bulk_exec(statements, transaction: transaction) }
+  end
+
+  # Queues *sql* for asynchronous execution via rqlite's Queued Writes,
+  # against a connection checked out from *db*'s pool — a convenience
+  # wrapper around `Rqlite::Connection#queue_exec`. See that method for
+  # the full semantics and its "HTTP 200 doesn't guarantee success"
+  # caveat.
+  def self.queue_exec(db : DB::Database, sql : String, *args : DB::Any, wait : Bool = false, timeout : Time::Span? = nil) : Int64
+    db.using_connection { |cnn| cnn.as(Connection).queue_exec(sql, *args, wait: wait, timeout: timeout) }
+  end
+
   # Converts a bound statement argument (one of `DB::Any`'s member types)
   # into the `JSON::Any` representation rqlite's `/db/execute` and
   # `/db/query` endpoints expect in their request body.

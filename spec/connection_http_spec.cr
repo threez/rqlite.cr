@@ -92,18 +92,13 @@ else
         table = "rqlite_cr_spec_bulk_#{Random::Secure.hex(4)}"
         db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, name TEXT)"
 
-        connection = db.checkout
-        begin
-          results = connection.as(Rqlite::Connection).bulk_exec([
-            {"INSERT INTO #{table} (name) VALUES (?)", ["dana"] of DB::Any},
-            {"INSERT INTO #{table} (name) VALUES (?)", ["erin"] of DB::Any},
-          ] of String | {String, Array(DB::Any)}, transaction: true)
+        results = Rqlite.bulk_exec(db, [
+          {"INSERT INTO #{table} (name) VALUES (?)", ["dana"] of DB::Any},
+          {"INSERT INTO #{table} (name) VALUES (?)", ["erin"] of DB::Any},
+        ] of String | {String, Array(DB::Any)}, transaction: true)
 
-          results.size.should eq(2)
-          results.all?(&.rows_affected.==(1)).should be_true
-        ensure
-          connection.release
-        end
+        results.size.should eq(2)
+        results.all?(&.rows_affected.==(1)).should be_true
 
         db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(2_i64)
       end
@@ -114,16 +109,11 @@ else
         table = "rqlite_cr_spec_bulk_fail_#{Random::Secure.hex(4)}"
         db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, name TEXT)"
 
-        connection = db.checkout
-        begin
-          expect_raises(Rqlite::Error) do
-            connection.as(Rqlite::Connection).bulk_exec([
-              "INSERT INTO #{table} (name) VALUES ('frank')",
-              "INSERT INTO no_such_table_xyz (name) VALUES ('x')",
-            ] of String | {String, Array(DB::Any)}, transaction: true)
-          end
-        ensure
-          connection.release
+        expect_raises(Rqlite::Error) do
+          Rqlite.bulk_exec(db, [
+            "INSERT INTO #{table} (name) VALUES ('frank')",
+            "INSERT INTO no_such_table_xyz (name) VALUES ('x')",
+          ] of String | {String, Array(DB::Any)}, transaction: true)
         end
 
         db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(0_i64)
@@ -135,15 +125,10 @@ else
         table = "rqlite_cr_spec_queue_#{Random::Secure.hex(4)}"
         db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, name TEXT)"
 
-        connection = db.checkout
-        begin
-          sequence_number = connection.as(Rqlite::Connection).queue_exec(
-            "INSERT INTO #{table} (name) VALUES (?)", "queued", wait: true, timeout: 5.seconds
-          )
-          sequence_number.should be_a(Int64)
-        ensure
-          connection.release
-        end
+        sequence_number = Rqlite.queue_exec(
+          db, "INSERT INTO #{table} (name) VALUES (?)", "queued", wait: true, timeout: 5.seconds
+        )
+        sequence_number.should be_a(Int64)
 
         db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(1_i64)
       end

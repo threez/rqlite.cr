@@ -86,34 +86,26 @@ For a multi-statement write where you need the real per-statement results (`rows
 ### Bulk requests
 
 ```crystal
-connection = db.checkout
-begin
-  results = connection.as(Rqlite::Connection).bulk_exec([
-    {"INSERT INTO foo (name) VALUES (?)", ["alice"] of DB::Any},
-    "INSERT INTO foo (name) VALUES ('bob')",
-  ] of String | {String, Array(DB::Any)}, transaction: true)
-  # results is an Array(DB::ExecResult), one per statement, in order
-ensure
-  connection.release
-end
+results = Rqlite.bulk_exec(db, [
+  {"INSERT INTO foo (name) VALUES (?)", ["alice"] of DB::Any},
+  "INSERT INTO foo (name) VALUES ('bob')",
+] of String | {String, Array(DB::Any)}, transaction: true)
+# results is an Array(DB::ExecResult), one per statement, in order
 ```
 
-Sends every statement as one real bulk `/db/execute` request, returning the real `DB::ExecResult` for each (unlike a buffered `db.transaction`). Pass `transaction: true` for rqlite's atomic all-or-nothing commit (the same mechanism `db.transaction` uses internally); omit it for a non-atomic batch where earlier statements can commit even if a later one fails. Raises `Rqlite::Error` naming the first failing statement — rqlite itself stops processing a batch at the first error.
+Sends every statement as one real bulk `/db/execute` request, returning the real `DB::ExecResult` for each (unlike a buffered `db.transaction`). Pass `transaction: true` for rqlite's atomic all-or-nothing commit (the same mechanism `db.transaction` uses internally); omit it for a non-atomic batch where earlier statements can commit even if a later one fails. Raises `Rqlite::Error` naming the first failing statement — rqlite itself stops processing a batch at the first error. Raises if called while a buffered transaction is open (the two models don't compose).
 
 ### Queued writes
 
 ```crystal
-connection = db.checkout
-begin
-  sequence_number = connection.as(Rqlite::Connection).queue_exec(
-    "INSERT INTO foo (name) VALUES (?)", "qux", wait: true, timeout: 5.seconds
-  )
-ensure
-  connection.release
-end
+sequence_number = Rqlite.queue_exec(
+  db, "INSERT INTO foo (name) VALUES (?)", "qux", wait: true, timeout: 5.seconds
+)
 ```
 
 Wraps rqlite's Queued Writes (`/db/execute?queue`) for high-throughput async writes. ⚠️ Per rqlite's own docs: *"when the API returns HTTP 200 OK, that simply acknowledges that the data has been queued correctly. It does not mean that the SQL statements are syntactically valid, or do not violate schema constraints."* A successful `queue_exec` call is **not** a guarantee the statement actually succeeded — monitor the rqlite node's own logs/metrics if that matters to you, or pass `wait: true` (optionally with `timeout:`) to block until it's actually flushed, trading the speed benefit away for a result you can trust. Raises `Rqlite::Error` if called while a buffered transaction is open — the two models don't compose.
+
+`Rqlite.bulk_exec`/`Rqlite.queue_exec` take a `DB::Database` and check out/release a pooled connection internally. If you already hold a checked-out `Rqlite::Connection` (e.g. via `db.checkout`, or `tx.connection` — though neither applies inside a buffered transaction), call `connection.bulk_exec(...)`/`connection.queue_exec(...)` directly instead.
 
 ### Consistency levels
 
