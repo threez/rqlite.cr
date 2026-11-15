@@ -67,12 +67,57 @@ describe Rqlite::Connection::Options do
       opts = Rqlite::Connection::Options.from_uri(uri)
       opts.timeout.should eq(5.seconds)
     end
+
+    it "defaults extra_hosts to empty" do
+      uri = URI.parse("rqlite://localhost:4001/")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+      opts.extra_hosts.should eq([] of {String, Int32})
+    end
+
+    it "parses the hosts query param into ordered failover targets" do
+      uri = URI.parse("rqlite://localhost:4001/?hosts=node2:4002,node3:4003")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+      opts.extra_hosts.should eq([{"node2", 4002}, {"node3", 4003}])
+    end
+
+    it "defaults a hosts entry without a port to 4001" do
+      uri = URI.parse("rqlite://localhost:4001/?hosts=node2")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+      opts.extra_hosts.should eq([{"node2", 4001}])
+    end
+
+    it "parses db_timeout, retries, qualify_columns, norwrandom, norwtime" do
+      uri = URI.parse("rqlite://localhost:4001/?db_timeout=2s&retries=3&qualify_columns=true&norwrandom=true&norwtime=true")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+
+      opts.db_timeout.should eq("2s")
+      opts.retries.should eq(3)
+      opts.qualify_columns.should be_true
+      opts.norwrandom.should be_true
+      opts.norwtime.should be_true
+    end
+
+    it "defaults db_timeout, retries, qualify_columns, norwrandom, norwtime" do
+      uri = URI.parse("rqlite://localhost:4001/")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+
+      opts.db_timeout.should be_nil
+      opts.retries.should be_nil
+      opts.qualify_columns.should be_false
+      opts.norwrandom.should be_false
+      opts.norwtime.should be_false
+    end
   end
 
   describe "#uri" do
-    it "builds a scheme://host:port URI with no path or query" do
+    it "builds a scheme://host:port URI with no path or query, using the record's own host/port by default" do
       opts = Rqlite::Connection::Options.new(scheme: "https", host: "db.example.com", port: 4001)
       opts.uri.should eq(URI.parse("https://db.example.com:4001"))
+    end
+
+    it "builds a scheme://host:port URI for an explicit host/port pair" do
+      opts = Rqlite::Connection::Options.new(scheme: "https")
+      opts.uri("node2", 4002).should eq(URI.parse("https://node2:4002"))
     end
   end
 end

@@ -38,6 +38,14 @@ module Rqlite
   VERSION = "0.1.0"
   Log     = ::Log.for("rqlite")
 
+  # Fallback text formats for `ResultSet#read(Time)`, used for a column
+  # written by something other than this driver's own `Time.to_rfc3339`
+  # binding (e.g. raw SQL, or another SQLite client) — mirrors
+  # `crystal-sqlite3`'s `DATE_FORMAT_SUBSECOND`/`DATE_FORMAT_SECOND`
+  # constants. Always interpreted as UTC.
+  DATE_FORMAT_SUBSECOND = "%F %H:%M:%S.%L"
+  DATE_FORMAT_SECOND    = "%F %H:%M:%S"
+
   @@client_builder : Connection::ClientBuilder = Connection::DEFAULT_CLIENT_BUILDER
 
   # The `HTTP::Client` builder used by every new `Rqlite::Connection` unless
