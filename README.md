@@ -10,6 +10,7 @@ A [`crystal-db`](https://github.com/crystal-lang/crystal-db) driver for [rqlite]
 - Positional (`?`) and named (`:name`) parameter binding
 - Statement-level error detection (`"error"` key in an otherwise-200 response) raised as `Rqlite::Error`
 - Transactions work via inherited `DB::Connection` behavior (`BEGIN`/`COMMIT`/`ROLLBACK` as literal SQL)
+- Pluggable `HTTP::Client` construction (`Rqlite.client_builder=`), rebuilt once on a transport error, so this shard can run under [`freebsd.cr`](https://github.com/threez/freebsd.cr)'s Capsicum sandboxing with no dependency on it
 
 ## Installation
 
@@ -79,10 +80,29 @@ end
 
 If `level` is omitted, rqlite itself defaults to `weak` consistency.
 
+### Running under a Capsicum sandbox (FreeBSD)
+
+`Rqlite::Connection` never constructs its `HTTP::Client` inline — it always goes through a `Rqlite::Connection::ClientBuilder` (a `Proc(URI, Time::Span, HTTP::Client)`), defaulting to plain `HTTP::Client.new(uri)`. This default can be swapped process-wide via `Rqlite.client_builder=`, which is how this shard supports running under [`freebsd.cr`](https://github.com/threez/freebsd.cr)'s `FreeBSD::Sandbox` Capsicum sandboxing, without `rqlite.cr` depending on `freebsd.cr` at all:
+
+```crystal
+require "rqlite"
+require "freebsd/sandbox"
+
+FreeBSD::Sandbox.prime_tls_context! # must run before cap_enter
+Rqlite.client_builder = FreeBSD::Sandbox.http_client_builder(timeout: 5.seconds)
+
+DB.open "rqlite://localhost:4001" do |db|
+  # every Rqlite::Connection now builds its HTTP::Client from the one
+  # OpenSSL::SSL::Context::Client primed before entering capability mode
+end
+```
+
+This works because `FreeBSD::Sandbox.http_client_builder` returns a plain `Proc(URI, Time::Span, HTTP::Client)` — Crystal's structural `Proc` typing accepts it as `Rqlite.client_builder=` with no adapter code, the same pattern used by [`kms`](https://github.com/threez)'s own HTTP client. You can also inject a builder for just one connection by constructing `Rqlite::Connection` directly with a `client_builder:` keyword argument, bypassing `DB.open`.
+
 ## Connection URI
 
 ```
-rqlite://user:pass@host:4001/?level=strong&freshness=1s
+rqlite://user:pass@host:4001/?level=strong&freshness=1s&timeout=5
 ```
 
 | Param         | Default | Notes                                                                        |
@@ -91,6 +111,7 @@ rqlite://user:pass@host:4001/?level=strong&freshness=1s
 | `freshness`   | unset   | duration string, passed through to `/db/query` as-is                          |
 | `tls` / `ssl` | `false` | forces `https`; also implied by using `rqlites://`                            |
 | `tls_verify`  | `true`  | reserved for future TLS cert verification toggle                              |
+| `timeout`     | `30`    | connect/read timeout in seconds, passed to the `ClientBuilder`                 |
 
 ## Error Handling
 
@@ -109,8 +130,9 @@ end
 ```
 Rqlite::Driver               DB.register_driver "rqlite" / "rqlites"
   └── ConnectionBuilder      uri → Rqlite::Connection::Options
-Rqlite::Connection           owns one HTTP::Client
-  └── Options                scheme/host/port/auth/level/freshness
+Rqlite::Connection           owns one HTTP::Client, built via a ClientBuilder
+  ├── Options                scheme/host/port/auth/level/freshness/timeout
+  └── ClientBuilder          Proc(URI, Time::Span, HTTP::Client); Rqlite.client_builder is the process-wide default
 Rqlite::Statement             SQL text + Connection ref (prepared == unprepared)
 Rqlite::ResultSet              parses rqlite's {columns,types,values} JSON response
 Rqlite::Error < DB::Error      statement-level "error" key

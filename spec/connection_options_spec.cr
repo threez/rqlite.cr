@@ -55,5 +55,24 @@ describe Rqlite::Connection::Options do
       opts = Rqlite::Connection::Options.from_uri(uri)
       opts.freshness.should eq("5s")
     end
+
+    it "defaults timeout to 30 seconds" do
+      uri = URI.parse("rqlite://localhost:4001/")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+      opts.timeout.should eq(30.seconds)
+    end
+
+    it "parses an explicit timeout query param as seconds" do
+      uri = URI.parse("rqlite://localhost:4001/?timeout=5")
+      opts = Rqlite::Connection::Options.from_uri(uri)
+      opts.timeout.should eq(5.seconds)
+    end
+  end
+
+  describe "#uri" do
+    it "builds a scheme://host:port URI with no path or query" do
+      opts = Rqlite::Connection::Options.new(scheme: "https", host: "db.example.com", port: 4001)
+      opts.uri.should eq(URI.parse("https://db.example.com:4001"))
+    end
   end
 end

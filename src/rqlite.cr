@@ -38,6 +38,24 @@ module Rqlite
   VERSION = "0.1.0"
   Log     = ::Log.for("rqlite")
 
+  @@client_builder : Connection::ClientBuilder = Connection::DEFAULT_CLIENT_BUILDER
+
+  # The `HTTP::Client` builder used by every new `Rqlite::Connection` unless
+  # one is passed explicitly to `Connection.new`. Set this to
+  # `FreeBSD::Sandbox.http_client_builder(timeout: ...)` (or any other
+  # `Proc(URI, Time::Span, HTTP::Client)`) before `DB.open`-ing an
+  # `rqlite://` URI to run under a Capsicum sandbox — see
+  # `Rqlite::Connection::ClientBuilder`. No dependency on `freebsd.cr` is
+  # required: Crystal's structural `Proc` typing accepts any proc with a
+  # matching signature.
+  def self.client_builder : Connection::ClientBuilder
+    @@client_builder
+  end
+
+  def self.client_builder=(builder : Connection::ClientBuilder)
+    @@client_builder = builder
+  end
+
   # Converts a bound statement argument (one of `DB::Any`'s member types)
   # into the `JSON::Any` representation rqlite's `/db/execute` and
   # `/db/query` endpoints expect in their request body.
