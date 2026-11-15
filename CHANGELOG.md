@@ -7,6 +7,18 @@ tagged via `make tag`).
 
 ## [Unreleased]
 
+- Added cluster-management/diagnostic helpers: `Rqlite.status`, `.nodes`,
+  `.ready?`, `.leader`, `.explain` (the `/db/sql` non-deterministic-
+  rewrite preview), `.backup`, and `.load`, each with a matching
+  `Rqlite::Connection` instance method. All return real `JSON::Serializable`
+  types (`Rqlite::Status`, `Rqlite::Node`, `Rqlite::Rewrite`) rather than
+  bare `JSON::Any`. `backup` streams rqlite's response directly into a
+  file path or `IO` instead of buffering it, and surfaces rqlite's
+  trailing `X-Stream-Error` header as `Rqlite::Error`. Extracted
+  `post_db`'s per-host retry loop into a shared `with_failover` helper so
+  every new endpoint gets the same multi-host failover as the data-plane
+  endpoints. Deliberately excluded `POST /leader` (force election) and
+  `POST /boot` (destructive single-node dataset replace).
 - Added `Rqlite.bulk_exec(db, ...)`/`Rqlite.queue_exec(db, ...)` module-
   level convenience wrappers around `Rqlite::Connection#bulk_exec`/
   `#queue_exec`, so calling them no longer requires manually checking

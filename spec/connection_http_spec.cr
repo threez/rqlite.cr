@@ -141,6 +141,57 @@ else
         end
       end
     end
+
+    it "reports node status, cluster membership, readiness, and the current leader" do
+      DB.open rqlite_uri do |db|
+        status = Rqlite.status(db)
+        status.build.try(&.version).should_not be_nil
+        status.http.try(&.auth).should eq("disabled")
+        status.node.try(&.uptime).should_not be_nil
+        status.runtime.try(&.num_goroutine).should_not be_nil
+
+        nodes = Rqlite.nodes(db)
+        nodes.size.should eq(1)
+        nodes.values.first.reachable?.should be_true
+
+        Rqlite.ready?(db).should be_true
+
+        leader = Rqlite.leader(db)
+        leader.try(&.leader?).should be_true
+      end
+    end
+
+    it "previews how rqlite would rewrite a non-deterministic statement via explain" do
+      DB.open rqlite_uri do |db|
+        rewrite = Rqlite.explain(db, "INSERT INTO foo(v) VALUES(RANDOM())")
+        rewrite.original.should eq("INSERT INTO foo(v) VALUES(RANDOM())")
+        rewrite.rewritten.should_not contain("RANDOM()")
+      end
+    end
+
+    it "backs up the database to a file and restores a SQL dump via load" do
+      DB.open rqlite_uri do |db|
+        table = "rqlite_cr_spec_backup_#{Random::Secure.hex(4)}"
+        db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, name TEXT)"
+        db.exec "INSERT INTO #{table} (name) VALUES (?)", "alice"
+
+        backup_path = File.tempname("rqlite_cr_spec_backup", ".sqlite")
+        begin
+          Rqlite.backup(db, backup_path)
+          File.size(backup_path).should be > 0
+          File.open(backup_path, "rb", &.gets(16)).should eq("SQLite format 3\0")
+        ensure
+          File.delete(backup_path) if File.exists?(backup_path)
+        end
+
+        sql_dump = IO::Memory.new
+        Rqlite.backup(db, sql_dump, format: Rqlite::Connection::BackupFormat::Sql, tables: [table])
+        sql_dump.to_s.should contain(table)
+
+        Rqlite.load(db, "INSERT INTO #{table} (name) VALUES ('bob');", format: Rqlite::Connection::LoadFormat::Sql)
+        db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(2_i64)
+      end
+    end
   end
 end
 

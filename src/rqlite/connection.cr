@@ -1,3 +1,22 @@
+# The `{"results": [...]}` envelope `GET /db/sql` wraps its single
+# `Rqlite::Rewrite` result in (same envelope shape as `/db/query`).
+private struct ExplainResponse
+  include JSON::Serializable
+
+  getter results : Array(Rqlite::Rewrite)
+end
+
+# The `{"nodes": [...]}` envelope `GET /nodes?ver=2` wraps its node list
+# in — confirmed against a live node: `ver=2`'s "improved JSON format,
+# easier for parsing" (per rqlite's own docs) is this array-in-an-
+# envelope shape, not the legacy object-keyed-by-ID shape the docs' shell
+# rendering shows for the *unversioned* `/nodes` response.
+private struct NodesResponse
+  include JSON::Serializable
+
+  getter nodes : Array(Rqlite::Node)
+end
+
 class Rqlite::Connection < DB::Connection
   # Read consistency levels supported by rqlite's `/db/query` endpoint via
   # the `level` query parameter. Not applicable to `/db/execute` writes.
@@ -338,6 +357,171 @@ class Rqlite::Connection < DB::Connection
     response["sequence_number"].as_i64
   end
 
+  # ── Cluster management / diagnostics ──────────────────────────────────
+  #
+  # These operate against whichever node this `Connection` is currently
+  # pointed at (not necessarily the cluster Leader, though most of them —
+  # `status`/`nodes`/`readyz`/`leader` — are documented as answerable by
+  # any reachable node), and use the same `with_failover` host-rotation
+  # as the data-plane endpoints. None of them send the data-plane-only
+  # query params (`level`, `errors=v2`, `db_timeout`, etc. — see
+  # `common_query_params`), since those aren't meaningful here.
+
+  # The format a `#backup` download is requested in — see that method.
+  enum BackupFormat
+    Binary
+    Delete
+    Sql
+  end
+
+  # The format `#load` expects *source* to already be in — see that
+  # method.
+  enum LoadFormat
+    Sql
+    Sqlite
+  end
+
+  # Diagnostic/statistical info for this node (`GET /status`): build info,
+  # HTTP config (including whether auth is enabled), node uptime, and Go
+  # runtime stats. rqlite's own docs don't show a full literal JSON body
+  # for this endpoint, so `Rqlite::Status` is deliberately permissive
+  # (every field nilable, with `JSON::Serializable::Unmapped` at every
+  # level) — treat it as best-effort typed access, not a guaranteed-
+  # complete schema.
+  def status : Status
+    path = "/status"
+    response = with_failover(&.get(path))
+    Status.from_json(ensure_success(response, path))
+  end
+
+  # Cluster membership as seen by this node (`GET /nodes?ver=2`), keyed
+  # by node ID. Pass `nonvoters: true` to also check read replicas (by
+  # default only voting nodes are checked); `timeout:` bounds how long
+  # the receiving node waits for every other node to respond (rqlite's
+  # own default is 30 seconds).
+  def nodes(nonvoters : Bool = false, timeout : Time::Span? = nil) : Hash(String, Node)
+    extra = {"ver" => "2"} of String => String
+    extra["nonvoters"] = "true" if nonvoters
+    extra["timeout"] = "#{timeout.total_seconds}s" if timeout
+
+    path = append_query("/nodes", extra)
+    response = with_failover(&.get(path))
+    envelope = NodesResponse.from_json(ensure_success(response, path))
+    envelope.nodes.to_h { |node| {node.id, node} }
+  end
+
+  # Whether this node is ready to serve database requests (`GET
+  # /readyz`), true only on an HTTP 200 response (rqlite's own docs only
+  # document the success status code explicitly; any other status is
+  # treated as not-ready rather than raising, since "not ready yet" is an
+  # expected, non-exceptional cluster state). Pass `noleader: true` to
+  # check only that the node itself is up, regardless of Leader status;
+  # `sync: true` (optionally with `timeout:`) to additionally block until
+  # the node has caught up to the Leader's last-known commit index.
+  def ready?(noleader : Bool = false, sync : Bool = false, timeout : Time::Span? = nil) : Bool
+    extra = {} of String => String
+    extra["noleader"] = "true" if noleader
+    extra["sync"] = "true" if sync
+    extra["timeout"] = "#{timeout.total_seconds}s" if timeout
+
+    path = append_query("/readyz", extra)
+    response = with_failover(&.get(path))
+    response.success?
+  end
+
+  # The cluster's current Leader, as seen by this node (`GET /leader`),
+  # or `nil` if no Leader currently exists (an expected cluster state
+  # during an election, not an error — neither rqlite's docs nor this
+  # driver treat it as exceptional).
+  def leader : Node?
+    response = with_failover(&.get("/leader"))
+    return unless response.success?
+    Node.from_json(response.body)
+  end
+
+  # Previews how rqlite would rewrite *sql* (`RANDOM()`, `RANDOMBLOB(N)`,
+  # `datetime('now')`, `CURRENT_TIMESTAMP`, etc. — see
+  # https://rqlite.io/docs/api/non-deterministic/) without executing it,
+  # via `GET /db/sql`.
+  def explain(sql : String) : Rewrite
+    path = append_query("/db/sql", {"q" => sql})
+    response = with_failover(&.get(path))
+    ExplainResponse.from_json(ensure_success(response, path)).results.first
+  end
+
+  # Downloads a backup of this node's database (`GET /db/backup`) into
+  # *destination* (a file path, or any caller-supplied `IO`), streaming
+  # it rather than buffering the whole body in memory. `format:` selects
+  # `Binary` (default — a WAL-mode SQLite file), `Delete` (a DELETE-mode
+  # SQLite file — "ensure you have sufficient disk space," per rqlite's
+  # own docs, since it involves an on-server copy), or `Sql` (a SQL text
+  # dump, optionally restricted to `tables:`). `vacuum`/`compress` are
+  # passed straight through to rqlite.
+  #
+  # Because the response is streamed, rqlite can't signal a mid-stream
+  # failure via an HTTP status code — instead it sets a trailing
+  # `X-Stream-Error` header once the stream ends early, which this method
+  # checks and raises `Rqlite::Error` for.
+  #
+  # NOTE: if *destination* is a raw `IO` (not a file path) and this call
+  # has to retry against another host mid-stream, the destination may end
+  # up with partial or duplicated data, since an arbitrary `IO` can't
+  # generally be rewound. A file path is reopened (and truncated) fresh
+  # on every attempt, so it doesn't have this caveat.
+  def backup(
+    destination : String | IO,
+    format : BackupFormat = BackupFormat::Binary,
+    vacuum : Bool = false,
+    compress : Bool = false,
+    tables : Array(String)? = nil,
+    noleader : Bool = false,
+  ) : Nil
+    path = append_query("/db/backup", backup_query_params(format, vacuum, compress, tables, noleader))
+
+    with_failover do |client|
+      client.get(path) do |response|
+        unless response.success?
+          raise Rqlite::Error.new("rqlite backup request to #{path} failed: HTTP #{response.status_code}")
+        end
+
+        if destination.is_a?(String)
+          File.open(destination, "wb") { |file| IO.copy(response.body_io, file) }
+        else
+          IO.copy(response.body_io, destination)
+        end
+
+        if (chunked = response.body_io.as?(HTTP::ChunkedContent)) && (stream_error = chunked.headers["X-Stream-Error"]?)
+          raise Rqlite::Error.new("rqlite backup stream failed: #{stream_error}")
+        end
+
+        response
+      end
+    end
+    nil
+  end
+
+  # Restores *source* (a SQL dump `String`/`Bytes`/`IO`, or a raw SQLite
+  # file's `Bytes`/`IO`) into this node via `POST /db/load`. `format:`
+  # must match what *source* actually contains: `LoadFormat::Sql`
+  # (`Content-Type: text/plain`) or `LoadFormat::Sqlite`
+  # (`Content-Type: application/octet-stream`).
+  #
+  # ⚠️ **Destructive**: per rqlite's own docs, loading replaces the
+  # node's existing data in its entirety, and loading a SQL dump into a
+  # cluster that already has data is explicitly undefined behavior. Only
+  # use this against a freshly-deployed node/cluster, with no other write
+  # traffic in flight.
+  def load(source : String | Bytes | IO, format : LoadFormat) : Nil
+    content_type = format.sql? ? "text/plain" : "application/octet-stream"
+    response = with_failover do |client|
+      client.post("/db/load", headers: HTTP::Headers{"Content-Type" => content_type}, body: source)
+    end
+
+    unless response.success?
+      raise Rqlite::Error.new("rqlite load request failed: HTTP #{response.status_code} #{response.body}")
+    end
+  end
+
   # Posts a JSON-encoded statement body to *path* (`/db/execute` or
   # `/db/query`), returns the parsed response body.
   #
@@ -356,20 +540,34 @@ class Rqlite::Connection < DB::Connection
   # :nodoc:
   def post_db(path : String, body : String, query_params : Hash(String, String)? = nil) : JSON::Any
     request_path = build_path(path, query_params)
+    response = with_failover do |client|
+      client.post(request_path, headers: HTTP::Headers{"Content-Type" => "application/json"}, body: body)
+    end
+    handle_json_response(response, request_path)
+  end
+
+  # Runs *block* against the current `HTTP::Client` (`@http`), retrying
+  # and failing over on a transport-level error exactly like `#post_db`:
+  # two attempts per configured host (the first retry handles a
+  # transient dead connection to the *same* host, e.g. an idle keep-alive
+  # silently closed by a middlebox; if that also fails, the next attempt
+  # rotates to the next configured host — with a single host this is
+  # exactly "retry once"), raising `DB::ConnectionLost` only once every
+  # host has failed twice. Guarded by `@lock` so concurrent fibers
+  # sharing this connection never race on rebuilding `@http`. Shared by
+  # every method that talks to rqlite over HTTP (`post_db`, and the
+  # cluster-management/backup/restore methods below), so only the actual
+  # socket operation is what gets retried — JSON-parse or other response
+  # handling happens after, outside the retried unit.
+  private def with_failover(&) : HTTP::Client::Response
     host_count = hosts.size
-    # Two attempts per configured host: the first retry handles a
-    # transient dead connection to the *same* host (e.g. an idle
-    # keep-alive silently closed by a middlebox); if that also fails,
-    # the next attempt rotates to the next configured host. With a
-    # single host this is exactly "retry once," matching the driver's
-    # original single-host behavior.
     total_attempts = host_count * 2
 
     @lock.synchronize do
       last_error = nil
 
       total_attempts.times do |attempt|
-        return perform_post(request_path, body)
+        return yield @http
       rescue ex : IO::Error | Socket::Error | IO::TimeoutError
         last_error = ex
         next if attempt == total_attempts - 1
@@ -436,14 +634,24 @@ class Rqlite::Connection < DB::Connection
     params
   end
 
+  # Appends `common_query_params` (`errors=v2`, `db_timeout`, `retries`,
+  # `qualify_columns`, `norwrandom`, `norwtime`) — the options meaningful
+  # to the *data-plane* endpoints, `/db/execute` and `/db/query` — on top
+  # of *extra_params*. Cluster-management/admin endpoints below use
+  # `append_query` directly instead, since those params aren't meaningful
+  # (or documented) outside the data plane.
   private def build_path(path : String, extra_params : Hash(String, String)?) : String
     merged = common_query_params
     extra_params.try &.each { |k, v| merged[k] = v unless v.empty? }
-    return path if merged.empty?
+    append_query(path, merged)
+  end
 
-    params = HTTP::Params.new
-    merged.each { |k, v| params[k] = v }
-    "#{path}?#{params}"
+  private def append_query(path : String, params : Hash(String, String)?) : String
+    return path if params.nil? || params.empty?
+
+    http_params = HTTP::Params.new
+    params.each { |k, v| http_params[k] = v unless v.empty? }
+    http_params.to_s.empty? ? path : "#{path}?#{http_params}"
   end
 
   private def wrap_statement(statement_array : Array(JSON::Any)) : String
@@ -454,13 +662,7 @@ class Rqlite::Connection < DB::Connection
     statement_array.first?.try(&.as_s) || "?"
   end
 
-  private def perform_post(request_path : String, body : String) : JSON::Any
-    response = @http.post(
-      request_path,
-      headers: HTTP::Headers{"Content-Type" => "application/json"},
-      body: body
-    )
-
+  private def handle_json_response(response : HTTP::Client::Response, request_path : String) : JSON::Any
     unless response.success?
       raise Rqlite::Error.new("rqlite request to #{request_path} failed: HTTP #{response.status_code} #{response.body}")
     end
@@ -477,6 +679,34 @@ class Rqlite::Connection < DB::Connection
     end
 
     json
+  end
+
+  # Like `handle_json_response`, but for the cluster-management endpoints
+  # that return a JSON body with no `raft_index`/statement-error envelope
+  # to track — just raises on a non-success status and hands back the
+  # raw body string for the caller to deserialize into its own type.
+  private def ensure_success(response : HTTP::Client::Response, request_path : String) : String
+    unless response.success?
+      raise Rqlite::Error.new("rqlite request to #{request_path} failed: HTTP #{response.status_code} #{response.body}")
+    end
+    response.body
+  end
+
+  private def backup_query_params(format : BackupFormat, vacuum : Bool, compress : Bool, tables : Array(String)?, noleader : Bool) : Hash(String, String)
+    extra = {} of String => String
+    case format
+    in .delete?
+      extra["fmt"] = "delete"
+    in .sql?
+      extra["fmt"] = "sql"
+      extra["tables"] = tables.join(',') if tables
+    in .binary?
+      # Default — no fmt param.
+    end
+    extra["vacuum"] = "true" if vacuum
+    extra["compress"] = "true" if compress
+    extra["noleader"] = "true" if noleader
+    extra
   end
 
   private def send_bulk(statement_arrays : Array(Array(JSON::Any)), transaction : Bool) : Array(DB::ExecResult)

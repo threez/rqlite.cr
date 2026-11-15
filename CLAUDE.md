@@ -42,6 +42,7 @@ Rqlite::Statement           DB::Statement — SQL text + ref to Connection
 Rqlite::ResultSet           DB::ResultSet — parses rqlite's {columns,types,values} JSON, narrowing read(T) overloads
 Rqlite::Error < DB::Error   statement-level "error"/"error_v2" key, #code/#extended_code (rqlite >= 10.6.0)
   └── TransactionReadNotSupportedError   raised for a read issued mid-transaction
+Rqlite::Status / Rqlite::Node / Rqlite::Rewrite   JSON::Serializable types for /status, /nodes & /leader, /db/sql
 ```
 
 ### Divergences from `crystal-sqlite3` (documented, not accidental)
@@ -67,6 +68,15 @@ rqlite's own docs state that explicitly issuing `BEGIN`/`COMMIT`/`ROLLBACK` SQL 
 ### Multi-host failover
 
 `Connection::Options#extra_hosts` (parsed from the `hosts=` URI query param) plus the primary `host`/`port` form an ordered failover list. `post_db` retries a transport-level error (`IO::Error | Socket::Error | IO::TimeoutError`) twice per configured host (once against the same host — handles a transient dead connection — then once more after rotating to the next host), raising `DB::ConnectionLost` only once every host has failed twice. Verified by hand against a real 3-node `rqlited` cluster (a 2-node cluster can't be used for this: Raft needs a majority of the *original* voter set to elect a new Leader, so losing 1 of 2 nodes leaves the survivor permanently without quorum).
+
+### Cluster management / diagnostics (`status`, `nodes`, `ready?`, `leader`, `explain`, `backup`, `load`)
+
+- `post_db`'s per-host retry loop was extracted into `with_failover(&block : HTTP::Client -> HTTP::Client::Response) : HTTP::Client::Response` so every HTTP-talking method shares the same host-failover behavior, not just the data-plane `/db/execute`/`/db/query` calls. Only the actual socket operation is retried — response parsing happens after, outside `with_failover`.
+- These endpoints use `append_query` directly (not `build_path`), since `build_path`'s `common_query_params` (`errors=v2`, `db_timeout`, etc.) are data-plane-only and not meaningful here.
+- `status`/`nodes`/`leader`/`explain` deserialize into real `JSON::Serializable` types (`Status`, `Hash(String, Node)`, `Node?`, `Rewrite`) rather than `JSON::Any` — every level includes `JSON::Serializable::Unmapped` since rqlite's docs don't publish a complete, stable schema for any of these (confirmed empirically: `/status`'s real body is far larger than the docs' YAML-rendered example; `/nodes?ver=2`'s real shape is `{"nodes": [...]}` — an array in an envelope, keyed by nothing — reshaped into `Hash(String, Node)` by `Connection#nodes` for a more useful public API, **not** the legacy object-keyed-by-ID shape the unversioned endpoint's docs example shows).
+- `leader`/`ready?` treat any non-success HTTP status as "no Leader"/"not ready" (`nil`/`false`) rather than raising — confirmed empirically against a real leaderless 3-node cluster: both `/leader` and `/readyz` return `503` during an election (`/leader` with body `{"error":"leader not found"}`), neither of which rqlite's docs state explicitly.
+- `backup` streams via `HTTP::Client`'s block-form `get` straight into *destination* (file path or `IO`), checking `response.body_io.as?(HTTP::ChunkedContent).try(&.headers["X-Stream-Error"]?)` after `IO.copy` reaches EOF — this is rqlite's documented way of signaling a failure *after* the response has already started streaming, since an HTTP status code can no longer be used at that point. `HTTP::ChunkedContent` is `:nodoc:` in Crystal's stdlib but still a plain public class, usable directly.
+- Deliberately not implemented: `POST /leader` (force election/step-down) and `POST /boot` (single-node-only, wipes and replaces the entire dataset) — considered and excluded as genuinely destructive/rarely-needed; see README.md "Explicitly out of scope".
 
 ## Development
 

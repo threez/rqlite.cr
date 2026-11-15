@@ -14,6 +14,7 @@ A [`crystal-db`](https://github.com/crystal-lang/crystal-db) driver for [rqlite]
 - Multi-host client-side failover (`hosts=` connection URI param) across a static list of cluster nodes
 - Pluggable `HTTP::Client` construction (`Rqlite.client_builder=`), rebuilt on a transport error, so this shard can run under [`freebsd.cr`](https://github.com/threez/freebsd.cr)'s Capsicum sandboxing with no dependency on it
 - Full narrowing `read` coercion (`Int8`–`Int32`, `UInt8`–`UInt32`, `Float32`, `Time`, `Bool`) matching `crystal-sqlite3`'s own set, defensive against SQLite's dynamic column typing
+- Cluster management/diagnostic helpers — `Rqlite.status`, `.nodes`, `.ready?`, `.leader`, `.explain` (preview rqlite's non-deterministic-function rewriting), `.backup`, `.load` — all returning real typed objects, not bare `JSON::Any`
 
 ## Installation
 
@@ -117,6 +118,40 @@ end
 
 If `level` is omitted, rqlite itself defaults to `weak` consistency.
 
+### Cluster management / diagnostics
+
+```crystal
+status = Rqlite.status(db)              # GET /status — build info, http config, uptime, Go runtime stats
+puts status.http.try(&.auth)             # => "disabled" / "enabled"
+
+nodes = Rqlite.nodes(db)                 # GET /nodes?ver=2 — Hash(String, Rqlite::Node), keyed by node ID
+nodes.each { |id, node| puts "#{id}: #{node.addr} (leader: #{node.leader?})" }
+
+Rqlite.ready?(db)                        # GET /readyz — true only on an HTTP 200 response
+leader = Rqlite.leader(db)               # GET /leader — Rqlite::Node, or nil if no Leader currently exists
+
+rewrite = Rqlite.explain(db, "INSERT INTO foo(v) VALUES(RANDOM())")
+rewrite.rewritten                        # => the literal rqlite would actually commit, e.g. "INSERT INTO \"foo\" (\"v\") VALUES (...)"
+```
+
+All of these return real `JSON::Serializable` types (`Rqlite::Status`, `Rqlite::Node`, `Rqlite::Rewrite`), not bare `JSON::Any` — each includes `JSON::Serializable::Unmapped` so a field rqlite adds in a future version is captured (via `#json_unmapped`) rather than raising a parse error, since rqlite's own docs don't publish a complete, stable `/status` schema. `nodes`/`leader`/`ready?` operate against whichever node this connection is currently pointed at; an absent Leader (`nil`/`false`) is treated as an expected cluster state (e.g. mid-election), not an error.
+
+Two admin operations rqlite exposes were deliberately **not** added: `POST /leader` (forces a Leadership election/step-down) and `POST /boot` (single-node-only, wipes and replaces the entire dataset from a raw SQLite image) — both are genuinely destructive/rarely-needed and are better driven directly against rqlite's HTTP API or the `rqlite` CLI than wrapped here.
+
+### Backup and restore
+
+```crystal
+Rqlite.backup(db, "backup.sqlite")                                      # GET /db/backup — binary SQLite file (WAL mode)
+Rqlite.backup(db, "backup.sql", format: Rqlite::Connection::BackupFormat::Sql, tables: ["users"])
+
+Rqlite.load(db, File.read("restore.sql"), format: Rqlite::Connection::LoadFormat::Sql)
+Rqlite.load(db, File.read("restore.sqlite").to_slice, format: Rqlite::Connection::LoadFormat::Sqlite)
+```
+
+`backup` streams the response directly into *destination* (a file path, or any `IO`) rather than buffering the whole body in memory — important since rqlite's own docs note a raw SQLite file backup "can be particularly CPU-intensive and memory-intensive" past ~100MB. `format:` selects `Binary` (default, WAL-mode), `Delete` (DELETE-mode, involves an on-server copy — "ensure you have sufficient disk space," per rqlite's docs), or `Sql` (a SQL text dump, optionally restricted via `tables:`). Because the response is streamed, rqlite signals a mid-stream failure via a trailing `X-Stream-Error` header rather than an HTTP status — `backup` checks for it and raises `Rqlite::Error`.
+
+⚠️ **`load` is destructive**: per rqlite's own docs, it replaces the node's existing data in its entirety, and loading a SQL dump into a cluster that already has data is explicitly undefined behavior. Only use it against a freshly-deployed node/cluster, with no other write traffic in flight.
+
 ### Running under a Capsicum sandbox (FreeBSD)
 
 `Rqlite::Connection` never constructs its `HTTP::Client` inline — it always goes through a `Rqlite::Connection::ClientBuilder` (a `Proc(URI, Time::Span, HTTP::Client)`), defaulting to plain `HTTP::Client.new(uri)`. This default can be swapped process-wide via `Rqlite.client_builder=`, which is how this shard supports running under [`freebsd.cr`](https://github.com/threez/freebsd.cr)'s `FreeBSD::Sandbox` Capsicum sandboxing, without `rqlite.cr` depending on `freebsd.cr` at all:
@@ -198,6 +233,7 @@ Rqlite::Statement             SQL text + Connection ref (prepared == unprepared)
 Rqlite::ResultSet              parses rqlite's {columns,types,values} JSON response, narrowing read(T) coercions
 Rqlite::Error < DB::Error      statement-level "error"/"error_v2" key, with #code/#extended_code
   └── TransactionReadNotSupportedError   raised for a read issued mid-transaction
+Rqlite::Status / Rqlite::Node / Rqlite::Rewrite   typed responses for /status, /nodes & /leader, /db/sql
 ```
 
 ## Development
@@ -247,4 +283,4 @@ Both e2e groups self-skip as `pending` when their respective env var is unset.
 
 - **The Unified Endpoint (`/db/request`)**, which mixes reads and writes in one request — `/db/query` + `/db/execute` already cover the `DB::Statement#query`/`#exec` split, and `bulk_exec` covers true multi-statement batches, so adding this would mostly duplicate existing functionality.
 - **Live cluster-membership discovery** via polling rqlite's `/nodes` endpoint — multi-host failover here is a static `hosts=` list from the connection URI, not dynamic discovery.
-- **Backup/restore** (`/db/backup`, `/db/load`) and node diagnostics (`/status`, `/nodes`, `/readyz`) — administrative concerns, not part of a `crystal-db` driver's job.
+- **`POST /leader`** (forces a Leadership election/step-down) and **`POST /boot`** (single-node-only, wipes and replaces the entire dataset from a raw SQLite image) — both genuinely destructive/rarely-needed administrative operations, considered and deliberately excluded (see "Cluster management / diagnostics" above).

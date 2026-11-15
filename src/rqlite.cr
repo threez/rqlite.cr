@@ -6,6 +6,9 @@ require "base64"
 require "db"
 
 require "./rqlite/error"
+require "./rqlite/node"
+require "./rqlite/status"
+require "./rqlite/rewrite"
 require "./rqlite/connection"
 require "./rqlite/statement"
 require "./rqlite/result_set"
@@ -82,6 +85,67 @@ module Rqlite
   # caveat.
   def self.queue_exec(db : DB::Database, sql : String, *args : DB::Any, wait : Bool = false, timeout : Time::Span? = nil) : Int64
     db.using_connection { |cnn| cnn.as(Connection).queue_exec(sql, *args, wait: wait, timeout: timeout) }
+  end
+
+  # Diagnostic/statistical info for the node *db* is currently connected
+  # to (`GET /status`) — a convenience wrapper around
+  # `Rqlite::Connection#status`.
+  def self.status(db : DB::Database) : Status
+    db.using_connection { |cnn| cnn.as(Connection).status }
+  end
+
+  # Cluster membership as seen by the node *db* is currently connected to
+  # (`GET /nodes`), keyed by node ID — a convenience wrapper around
+  # `Rqlite::Connection#nodes`.
+  def self.nodes(db : DB::Database, nonvoters : Bool = false, timeout : Time::Span? = nil) : Hash(String, Node)
+    db.using_connection { |cnn| cnn.as(Connection).nodes(nonvoters: nonvoters, timeout: timeout) }
+  end
+
+  # Whether the node *db* is currently connected to is ready to serve
+  # database requests (`GET /readyz`) — a convenience wrapper around
+  # `Rqlite::Connection#ready?`.
+  def self.ready?(db : DB::Database, noleader : Bool = false, sync : Bool = false, timeout : Time::Span? = nil) : Bool
+    db.using_connection { |cnn| cnn.as(Connection).ready?(noleader: noleader, sync: sync, timeout: timeout) }
+  end
+
+  # The cluster's current Leader, as seen by the node *db* is currently
+  # connected to (`GET /leader`), or `nil` if no Leader currently exists
+  # (an expected cluster state, not an error) — a convenience wrapper
+  # around `Rqlite::Connection#leader`.
+  def self.leader(db : DB::Database) : Node?
+    db.using_connection { |cnn| cnn.as(Connection).leader }
+  end
+
+  # Previews how rqlite would rewrite *sql* (`RANDOM()`, `RANDOMBLOB(N)`,
+  # `datetime('now')`, etc.) without executing it (`GET /db/sql`) — a
+  # convenience wrapper around `Rqlite::Connection#explain`.
+  def self.explain(db : DB::Database, sql : String) : Rewrite
+    db.using_connection { |cnn| cnn.as(Connection).explain(sql) }
+  end
+
+  # Downloads a backup of the node *db* is currently connected to
+  # (`GET /db/backup`) into *destination* — a convenience wrapper around
+  # `Rqlite::Connection#backup`. See that method for the full semantics.
+  def self.backup(
+    db : DB::Database,
+    destination : String | IO,
+    format : Connection::BackupFormat = Connection::BackupFormat::Binary,
+    vacuum : Bool = false,
+    compress : Bool = false,
+    tables : Array(String)? = nil,
+    noleader : Bool = false,
+  ) : Nil
+    db.using_connection do |cnn|
+      cnn.as(Connection).backup(destination, format: format, vacuum: vacuum, compress: compress, tables: tables, noleader: noleader)
+    end
+  end
+
+  # Restores *source* into the node *db* is currently connected to
+  # (`POST /db/load`) — a convenience wrapper around
+  # `Rqlite::Connection#load`. See that method for the full semantics and
+  # its "destructive, replaces all existing data" caveat.
+  def self.load(db : DB::Database, source : String | Bytes | IO, format : Connection::LoadFormat) : Nil
+    db.using_connection { |cnn| cnn.as(Connection).load(source, format: format) }
   end
 
   # Converts a bound statement argument (one of `DB::Any`'s member types)
