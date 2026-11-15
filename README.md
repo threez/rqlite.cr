@@ -22,7 +22,7 @@ A [`crystal-db`](https://github.com/crystal-lang/crystal-db) driver for [rqlite]
 dependencies:
   rqlite:
     github: threez/rqlite.cr
-    version: ~> 0.1
+    version: ~> 1.0
 ```
 
 ```
@@ -62,6 +62,11 @@ db.query_one "SELECT id FROM foo WHERE name = :name", {"name" => "qux"}, as: Int
 
 A single `Hash` argument is detected and sent using rqlite's native
 `:name`-placeholder parameter form, instead of the positional `?` form.
+Mixing a named-parameter and a positional statement in one buffered
+transaction or `bulk_exec` batch is confirmed to work (rqlite's docs
+only prohibit mixing a parameterized statement with a bare,
+non-parameterized SQL string in the same request — not mixing named vs.
+positional parameterized forms with each other).
 
 ### Transactions
 
@@ -134,7 +139,9 @@ rewrite = Rqlite.explain(db, "INSERT INTO foo(v) VALUES(RANDOM())")
 rewrite.rewritten                        # => the literal rqlite would actually commit, e.g. "INSERT INTO \"foo\" (\"v\") VALUES (...)"
 ```
 
-All of these return real `JSON::Serializable` types (`Rqlite::Status`, `Rqlite::Node`, `Rqlite::Rewrite`), not bare `JSON::Any` — each includes `JSON::Serializable::Unmapped` so a field rqlite adds in a future version is captured (via `#json_unmapped`) rather than raising a parse error, since rqlite's own docs don't publish a complete, stable `/status` schema. `nodes`/`leader`/`ready?` operate against whichever node this connection is currently pointed at; an absent Leader (`nil`/`false`) is treated as an expected cluster state (e.g. mid-election), not an error.
+All of these return real `JSON::Serializable` types (`Rqlite::Status`, `Rqlite::Node`, `Rqlite::Rewrite`), not bare `JSON::Any` — each includes `JSON::Serializable::Unmapped` so a field rqlite adds in a future version is captured (via `#json_unmapped`) rather than raising a parse error, since rqlite's own docs don't publish a complete, stable `/status` schema. `nodes`/`leader`/`ready?` operate against whichever node this connection is currently pointed at; an absent Leader (`nil`/`false`) is treated as an expected cluster state (e.g. mid-election), not an error — confirmed against a real leaderless cluster: both `/leader` and `/readyz` return HTTP 503 during an election, which neither endpoint's docs state explicitly.
+
+If you're running with rqlite's own authentication enabled: `/nodes` requires the `status` permission (confirmed empirically — rqlite's security guide doesn't list a permission for it explicitly), same as `/status`; `/readyz` needs `ready`; `/leader` needs `leader-ops`; `explain` (`/db/sql`) needs `query`.
 
 Two admin operations rqlite exposes were deliberately **not** added: `POST /leader` (forces a Leadership election/step-down) and `POST /boot` (single-node-only, wipes and replaces the entire dataset from a raw SQLite image) — both are genuinely destructive/rarely-needed and are better driven directly against rqlite's HTTP API or the `rqlite` CLI than wrapped here.
 
@@ -192,6 +199,20 @@ rqlite://user:pass@host:4001/?level=strong&freshness=1s&timeout=5&hosts=node2:40
 | `norwtime`         | `false` | same, for date/time functions (`datetime('now')`, `CURRENT_TIMESTAMP`, etc.) |
 
 Every request also sets `errors=v2` (always, for the richer `Rqlite::Error#code`/`#extended_code` described above).
+
+### Connection pooling
+
+`crystal-db`'s own pool options are parsed from the same connection URI transparently (via `DB::Driver#connection_options`/`#pool_options`, inherited by `Rqlite::Driver` — no rqlite.cr-specific code needed), confirmed working end-to-end:
+
+```crystal
+DB.open "rqlite://localhost:4001?max_pool_size=5&initial_pool_size=1&checkout_timeout=2&retry_attempts=1" do |db|
+  # standard crystal-db pool semantics: DB::PoolTimeout if max_pool_size
+  # connections are all checked out and none free up within
+  # checkout_timeout seconds
+end
+```
+
+See [`DB::Pool::Options`](https://github.com/crystal-lang/crystal-db/blob/master/src/db/pool.cr) for the full set (`initial_pool_size`, `max_pool_size`, `max_idle_pool_size`, `checkout_timeout`, `retry_attempts`, `retry_delay`).
 
 ### Multi-host failover
 

@@ -38,7 +38,7 @@ require "./rqlite/driver"
 # See `Rqlite::Connection::Options` for the full set of `rqlite://` URI
 # query parameters (consistency `level`, `freshness`, TLS, etc).
 module Rqlite
-  VERSION = "0.1.0"
+  VERSION = "1.0.0"
   Log     = ::Log.for("rqlite")
 
   # Fallback text formats for `ResultSet#read(Time)`, used for a column

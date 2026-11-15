@@ -87,6 +87,43 @@ else
       end
     end
 
+    it "commits a buffered transaction mixing named-parameter and positional statements in one bulk request" do
+      # rqlite's docs say a single request can't mix parameterized and
+      # non-parameterized (bare-string) statements, but don't address
+      # mixing named-parameter and positional-parameter statements with
+      # each other in one batch — confirmed empirically here to work.
+      DB.open rqlite_uri do |db|
+        table = "rqlite_cr_spec_mixed_params_#{Random::Secure.hex(4)}"
+        db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, name TEXT)"
+
+        db.transaction do |tx|
+          tx.connection.exec "INSERT INTO #{table} (name) VALUES (?)", "positional"
+          tx.connection.exec "INSERT INTO #{table} (name) VALUES (:name)", {"name" => "named"}
+        end
+
+        db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(2_i64)
+      end
+    end
+
+    it "honors pool options parsed from the connection URI (max_pool_size, checkout_timeout)" do
+      pool_uri = URI.parse(rqlite_uri)
+      params = HTTP::Params.new
+      params["max_pool_size"] = "1"
+      params["initial_pool_size"] = "1"
+      params["checkout_timeout"] = "1"
+      params["retry_attempts"] = "0"
+      pool_uri.query = params.to_s
+
+      DB.open pool_uri.to_s do |db|
+        held = db.checkout
+        begin
+          expect_raises(DB::PoolTimeout) { db.checkout }
+        ensure
+          held.release
+        end
+      end
+    end
+
     it "runs a true bulk request via bulk_exec, atomically with transaction: true" do
       DB.open rqlite_uri do |db|
         table = "rqlite_cr_spec_bulk_#{Random::Secure.hex(4)}"
@@ -223,6 +260,24 @@ else
         table = "rqlite_cr_spec_auth_#{Random::Secure.hex(4)}"
         db.exec "CREATE TABLE #{table} (id INTEGER PRIMARY KEY)"
         db.scalar("SELECT COUNT(*) FROM #{table}").as(Int64).should eq(0_i64)
+      end
+    end
+
+    it "sends credentials through for the cluster-management endpoints too" do
+      # Confirmed empirically (not documented by rqlite): /nodes requires
+      # the same "status" permission as /status, not a separate one —
+      # this just confirms our Basic Auth header reaches those endpoints
+      # the same way it reaches /db/execute and /db/query.
+      uri = URI.parse(AUTH_URL)
+      uri.scheme = "rqlite"
+      uri.user = "admin"
+      uri.password = "secret"
+
+      DB.open uri.to_s do |db|
+        Rqlite.status(db).build.should_not be_nil
+        Rqlite.nodes(db).should_not be_empty
+        Rqlite.ready?(db).should be_true
+        Rqlite.leader(db).should_not be_nil
       end
     end
   end

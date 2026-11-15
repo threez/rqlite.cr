@@ -7,6 +7,28 @@ tagged via `make tag`).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-15
+
+Closing pass before declaring the API stable: confirmed, against live
+nodes, the few things earlier passes had left as untested assumptions
+rather than verified behavior.
+
+- Connection pooling (`max_pool_size`, `initial_pool_size`,
+  `checkout_timeout`, `retry_attempts`, `retry_delay` via the connection
+  URI) needed no rqlite.cr-specific code — inherited transparently from
+  `DB::Driver`. Confirmed `DB::PoolTimeout` is raised correctly; added
+  an e2e test and documented it in the README.
+- Confirmed mixing a named-parameter statement and a positional
+  statement in one bulk request (a buffered transaction, or
+  `bulk_exec`) works — rqlite's docs only prohibit mixing a
+  parameterized statement with a bare non-parameterized SQL string in
+  the same request, not mixing named vs. positional forms with each
+  other.
+- Confirmed `/nodes` requires the `status` permission (same as
+  `/status`) under rqlite auth — undocumented by rqlite's own security
+  guide. `/readyz` (`ready`), `/leader` (`leader-ops`), and `/db/sql`
+  (`query`) all match their documented permissions.
+
 - Added cluster-management/diagnostic helpers: `Rqlite.status`, `.nodes`,
   `.ready?`, `.leader`, `.explain` (the `/db/sql` non-deterministic-
   rewrite preview), `.backup`, and `.load`, each with a matching

@@ -78,6 +78,12 @@ rqlite's own docs state that explicitly issuing `BEGIN`/`COMMIT`/`ROLLBACK` SQL 
 - `backup` streams via `HTTP::Client`'s block-form `get` straight into *destination* (file path or `IO`), checking `response.body_io.as?(HTTP::ChunkedContent).try(&.headers["X-Stream-Error"]?)` after `IO.copy` reaches EOF — this is rqlite's documented way of signaling a failure *after* the response has already started streaming, since an HTTP status code can no longer be used at that point. `HTTP::ChunkedContent` is `:nodoc:` in Crystal's stdlib but still a plain public class, usable directly.
 - Deliberately not implemented: `POST /leader` (force election/step-down) and `POST /boot` (single-node-only, wipes and replaces the entire dataset) — considered and excluded as genuinely destructive/rarely-needed; see README.md "Explicitly out of scope".
 
+### v1.0 closing-pass findings (confirmed empirically against live nodes, not just unit tests)
+
+- Connection pooling (`max_pool_size`, `initial_pool_size`, `checkout_timeout`, `retry_attempts`, `retry_delay` via the connection URI) needed zero rqlite.cr-specific code — it's parsed by `DB::Driver#connection_options`/`#pool_options`, inherited by `Rqlite::Driver`. Confirmed `DB::PoolTimeout` is raised correctly.
+- Mixing a named-parameter statement and a positional statement in one bulk request (a buffered transaction, or `bulk_exec`) works — rqlite's docs only prohibit mixing a parameterized statement with a bare non-parameterized SQL string in the same request, not mixing named vs. positional parameterized forms with each other.
+- `/nodes` requires the `status` permission (same as `/status`) when rqlite auth is enabled — rqlite's own security guide doesn't list a permission for `/nodes` at all; confirmed by testing against scoped-permission users on a live auth-enabled node. `/readyz` needs `ready`, `/leader` needs `leader-ops`, `/db/sql` needs `query` — all as documented.
+
 ## Development
 
 Unit specs run without any live rqlite node. E2E specs are gated behind `ENV["RQLITE_URL"]?`/`ENV["RQLITE_AUTH_URL"]?` and `pending` themselves when unset.
