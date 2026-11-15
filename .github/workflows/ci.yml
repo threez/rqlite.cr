@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint & compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.1
+
+      - name: Cache shards
+        uses: actions/cache@v4
+        with:
+          path: lib
+          key: ${{ runner.os }}-shards-${{ hashFiles('shard.lock') }}
+          restore-keys: ${{ runner.os }}-shards-
+
+      - run: shards install
+
+      - name: Build ameba
+        run: crystal build lib/ameba/src/cli.cr -o lib/ameba/bin/ameba
+
+      - name: Format check
+        run: crystal tool format --check
+
+      - name: Ameba lint
+        run: lib/ameba/bin/ameba
+
+      - name: Compile check
+        run: crystal build src/rqlite.cr -o /tmp/rqlite_check --no-codegen
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.1
+
+      - name: Cache shards
+        uses: actions/cache@v4
+        with:
+          path: lib
+          key: ${{ runner.os }}-shards-${{ hashFiles('shard.lock') }}
+          restore-keys: ${{ runner.os }}-shards-
+
+      - run: shards install
+
+      - name: Run specs
+        run: crystal spec --order=random
+
+  verify-macos:
+    name: Verify (macOS)
+    runs-on: macos-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install crystal
+      - run: shards install
+      - run: make spec
+
+  e2e:
+    name: E2E (rqlited)
+    runs-on: ubuntu-latest
+    needs: lint
+    env:
+      RQLITE_URL: http://localhost:4001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.1
+      - run: shards install
+
+      - name: Download rqlited
+        run: |
+          curl -L -o rqlite.tar.gz \
+            https://github.com/rqlite/rqlite/releases/download/v10.7.1/rqlite-v10.7.1-linux-amd64.tar.gz
+          tar xzf rqlite.tar.gz
+          sudo mv rqlite-v10.7.1-linux-amd64/rqlited /usr/local/bin/rqlited
+
+      - name: Start rqlited
+        run: |
+          mkdir -p /tmp/rqlite-node1
+          rqlited -node-id=1 /tmp/rqlite-node1 &
+
+      - name: Wait for rqlited
+        run: timeout 30 bash -c 'until curl -sf http://localhost:4001/status; do sleep 1; done'
+
+      - run: make e2e

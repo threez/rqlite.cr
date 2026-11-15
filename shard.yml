@@ -1,0 +1,19 @@
+name: rqlite
+version: 0.1.0
+
+authors:
+  - Vincent Landgraf <vincent@landgrafx.de>
+
+crystal: '>= 1.19.1'
+
+license: MIT
+
+dependencies:
+  db:
+    github: crystal-lang/crystal-db
+    version: ~> 0.15
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.7.0
